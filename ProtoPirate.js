@@ -1,6 +1,11 @@
 /**
  * ProtoPirate Car Key Decoder for Bruce Firmware 2.0+
- * FIXED: Menu navigation now works correctly
+ * Receive preset and RAW preservation fixes.
+ * Requires patched Bruce for subghz.readRaw(timeout, preset).
+ * Receive decoders: Kia V0 (existing), Chrysler V0 (added, receive-only).
+ * Chrysler framing adapted from Sor3nt PR #119, commit
+ * 4c5e129911607afab93218051f5a4f57a7ac1b06 (GPL-3.0).
+ * Hardware validation pending. This is not full ProtoPirate 3.6.3 parity.
  * Converted from Flipper Zero C application
  */
 
@@ -50,12 +55,14 @@ var menuItems = [
     "Signal History",
     "Timing Analyzer",
     "Set Frequency",
+    "Receive Preset",
     "Protocol Info",
     "Exit"
 ];
 var appState = "menu";
 var lastResult = null;
 var lastRawData = "";
+var lastCaptureContent = "";
 var frequency = 433.92;
 var freqOptions = [315.0, 433.92, 868.35];
 var freqIndex = 1;
@@ -67,6 +74,27 @@ var historyIndex = 0;
 var saveCounter = 0;
 var HISTORY_MAX = 20;
 var presetName = "AM650";
+var presetIndex = 0;
+var presetLabels = ["AM650", "AM270", "FM476", "FM238"];
+var presetValues = ["Ook650Async", "Ook270Async", "2FSKDev476Async", "2FSKDev238Async"];
+function selectedPreset() { return presetValues[presetIndex]; }
+function readCapture() {
+    presetName = presetLabels[presetIndex];
+    var content = subghz.readRaw(1, selectedPreset());
+    if (content && content.length > 10) {
+        // Old firmware ignores argument #2. Never pretend it applied FM.
+        if (content.indexOf("Bruce_RX_Preset: " + selectedPreset()) < 0) {
+            drawMessage("Needs RF capture firmware\nRX preset was not applied", RED);
+            delay(1500);
+            appState = "menu";
+            setLongPress(false);
+            drawMenu();
+            return "";
+        }
+        lastCaptureContent = content;
+    }
+    return content;
+}
 
 // ============================================================================
 // UTILITY FUNCTIONS
@@ -155,7 +183,9 @@ function historyAdd(result, rawData) {
         result: result,
         rawData: rawData,
         frequency: frequency,
-        preset: presetName
+        preset: presetName,
+        presetIndex: presetIndex,
+        content: lastCaptureContent
     });
     return true;
 }
@@ -172,10 +202,10 @@ function historyGetFullItem(idx) {
     var r = item.result;
     var text = "Protocol: " + r.proto + "\n";
     text += "Bits: " + r.bits + "\n";
-    text += "Serial: " + toHex(r.serial, 7) + "\n";
+    text += "Serial: " + (r.receiveOnly ? "Unknown" : toHex(r.serial, 7)) + "\n";
     text += "Button: " + r.btnName + "\n";
-    text += "Counter: 0x" + toHex(r.counter, 4) + "\n";
-    text += "CRC: " + (r.crcOk ? "OK" : "FAIL") + "\n";
+    text += "Counter: " + (r.receiveOnly ? "Unknown" : "0x" + toHex(r.counter, 4)) + "\n";
+    text += (r.receiveOnly ? "Structure: " : "CRC: ") + (r.crcOk ? "OK" : "FAIL") + "\n";
     text += "Freq: " + item.frequency + " MHz";
     return text;
 }
@@ -259,22 +289,13 @@ function decodeSubaru(pulses) { return null; }
 function extractSubaru(dataHi, dataLo, bitCount) { return null; }
 function decodeFiatV0(pulses) { return null; }
 function extractFiatV0(dataHi, dataLo, bitCount) { return null; }
-function decodeChrysler(pulses) { return null; }
+
 function extractChrysler(dataHi, dataLo, bitCount) { return null; }
 function decodeGenericPWM(pulses, proto) { return null; }
 
 function tryDecode(pulses) {
-    var result;
-    result = decodeKiaV0(pulses); if (result) return result;
-    result = decodeKiaV1(pulses); if (result) return result;
-    result = decodeKiaV2(pulses); if (result) return result;
-    result = decodeStarLine(pulses); if (result) return result;
-    result = decodeScherKhan(pulses); if (result) return result;
-    result = decodeSubaru(pulses); if (result) return result;
-    result = decodeFiatV0(pulses); if (result) return result;
-    result = decodeChrysler(pulses); if (result) return result;
-    result = decodeGenericPWM(pulses, PROTO_FORD); if (result) return result;
-    result = decodeGenericPWM(pulses, PROTO_SUZUKI); if (result) return result;
+    if (presetName === "FM476") return decodeKiaV0(pulses);
+    if (presetName === "AM650" || presetName === "AM270") return decodeChrysler(pulses);
     return null;
 }
 
@@ -283,27 +304,42 @@ function tryDecode(pulses) {
 // ============================================================================
 
 function parseRaw(str) {
+    var tokens = str.trim().split(/\s+/);
     var pulses = [];
-    var num = "";
-    for (var i = 0; i <= str.length; i++) {
-        var c = i < str.length ? str.charAt(i) : " ";
-        if (c === "-" || (c >= "0" && c <= "9")) { num += c; }
-        else if (num.length > 0) {
-            var v = parseInt(num, 10);
-            if (v !== 0 && abs(v) > 50 && abs(v) < 5000) { pulses.push(v); }
-            num = "";
-        }
+    for (var i = 0; i < tokens.length; i++) {
+        if (!/^[+-]?[0-9]+$/.test(tokens[i])) return [];
+        var value = parseInt(tokens[i], 10);
+        if (!value || abs(value) > 10000000 || pulses.length >= 8192) return [];
+        // Gaps and short pulses are part of framing. Preserve them verbatim.
+        pulses.push(value);
     }
     return pulses;
 }
-
 function extractRawData(content) {
-    var idx = content.indexOf("RAW_Data:");
-    if (idx < 0) return null;
-    var start = idx + 9;
-    var end = content.indexOf("\n", start);
-    if (end < 0) end = content.length;
-    return content.substring(start, end);
+    var lines = content.split("\n"), parts = [];
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (line.indexOf("RAW_Data:") === 0 || line.indexOf("Data_RAW:") === 0)
+            parts.push(line.substring(line.indexOf(":") + 1).trim());
+    }
+    return parts.length ? parts.join(" ") : null;
+}
+function savedRawContent() {
+    // Keep receive settings and metadata from the original capture, including
+    // imported presets. Only rebuild RAW_Data to the standard 512-value limit.
+    var lines = lastCaptureContent.split("\n"), meta = [];
+    for (var i = 0; i < lines.length; i++) {
+        var line = lines[i].trim();
+        if (line.indexOf("Frequency:") === 0 || line.indexOf("Preset:") === 0 ||
+            line.indexOf("Custom_preset_") === 0 || line.indexOf("Bruce_") === 0) meta.push(line);
+    }
+    var content = "Filetype: Flipper SubGhz RAW File\nVersion: 1\n";
+    if (!meta.length) meta.push("Frequency: " + Math.round(frequency * 1000000), "Preset: " + selectedPreset());
+    content += meta.join("\n") + "\nProtocol: RAW\n";
+    var pulses = parseRaw(lastRawData);
+    for (var j = 0; j < pulses.length; j += 512)
+        content += "RAW_Data: " + pulses.slice(j, j + 512).join(" ") + "\n";
+    return content;
 }
 
 function extractFrequency(content) {
@@ -347,6 +383,8 @@ function loadAndDecodeFile(filepath) {
     try {
         var content = storage.read(filepath);
         if (!content || content.length < 20) { drawMessage("File empty!", RED); delay(1500); return false; }
+        lastCaptureContent = content;
+        adoptFilePreset(content);
         var fileFreq = extractFrequency(content);
         if (fileFreq) { frequency = fileFreq; subghz.setFrequency(frequency); }
         var rawStr = extractRawData(content);
@@ -441,6 +479,8 @@ function handleHistoryView() {
         delay(200);
         var item = history[historyIndex];
         lastResult = item.result; lastRawData = item.rawData; frequency = item.frequency;
+        presetIndex = item.presetIndex; presetName = item.preset;
+        lastCaptureContent = item.content;
         subghz.setFrequency(frequency); resultMenuIndex = 0;
         appState = "result"; drawResult(lastResult);
     }
@@ -461,7 +501,7 @@ function handleTimingAnalyzer() {
     if (getSelPress()) {
         delay(200); setLongPress(true);
         drawMessage("Capturing...", CYAN);
-        var rawContent = subghz.readRaw(1);
+        var rawContent = readCapture();
         setLongPress(false);
         if (rawContent && rawContent.length > 10) {
             drawMessage("Signal captured!\n(Analysis WIP)", GREEN); delay(1500);
@@ -482,8 +522,7 @@ function saveSignal() {
     var r = lastResult; saveCounter++;
     var protoName = r.proto.replace(/[\s\/]/g, "_");
     var filename = "pp_" + protoName + "_" + saveCounter + ".sub";
-    var content = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: " + Math.floor(frequency * 1000000) + "\nPreset: FuriHalSubGhzPresetOok650Async\nProtocol: RAW\n";
-    content += "# ProtoPirate: " + r.proto + "\n# Serial: " + toHex(r.serial, 7) + "\nRAW_Data: " + lastRawData + "\n";
+    var content = savedRawContent();
     var saved = false, savePath = "";
     var paths = ["/" + filename, "/BruceRF/" + filename, "/subghz/" + filename];
     for (var i = 0; i < paths.length; i++) {
@@ -500,6 +539,7 @@ function saveSignal() {
 
 function transmitSignal() {
     if (!lastResult) { drawMessage("No signal to transmit!", RED); delay(1000); return; }
+    if (lastResult.receiveOnly) { drawMessage("Receive-only decoder", YELLOW); delay(1000); return; }
     if (lastResult.encrypted) {
         clearScreen(); setTextSize(2); setTextColor(RED); drawString("WARNING!", 10, 5);
         setTextSize(1); setTextColor(WHITE); drawString("ENCRYPTED SIGNAL", 10, 30);
@@ -529,7 +569,8 @@ function drawMenu() {
     setTextSize(1); setTextColor(WHITE); drawString("Bruce Edition v3.0", 10, 28);
     drawStatusBar();
     var y = 50;
-    for (var i = 0; i < menuItems.length; i++) {
+    var first = Math.max(0, menuIndex - 4);
+    for (var i = first; i < menuItems.length && i < first + 5; i++) {
         if (i === menuIndex) { drawFillRect(5, y - 2, screenWidth - 10, 16, GRAY); setTextColor(CYAN); }
         else { setTextColor(WHITE); }
         drawString(menuItems[i], 15, y); y += 20;
@@ -551,11 +592,11 @@ function drawResult(r) {
     setTextSize(1); setTextColor(CYAN); drawString(r.proto + " " + r.bits + "-bit @ " + frequency + "MHz", 10, 28);
     setTextColor(WHITE);
     var y = 42;
-    drawString("Key: " + toHex(r.dataHi, 8) + toHex(r.dataLo, 8), 10, y); y += 12;
-    drawString("Sn:" + toHex(r.serial, 7) + " Btn:" + r.btnName, 10, y); y += 12;
-    drawString("Cnt:0x" + toHex(r.counter, 4), 10, y);
-    if (r.crcOk) { setTextColor(GREEN); drawString(" CRC:OK", 80, y); }
-    else { setTextColor(RED); drawString(" CRC:FAIL", 80, y); }
+    drawString("Key: " + (r.rawHex || (toHex(r.dataHi, 8) + toHex(r.dataLo, 8))), 10, y); y += 12;
+    drawString((r.fieldsUnknown ? "Sn:unknown" : "Sn:" + toHex(r.serial, 7)) + " Btn:" + r.btnName, 10, y); y += 12;
+    drawString(r.fieldsUnknown ? "Counter:unknown" : "Cnt:0x" + toHex(r.counter, 4), 10, y);
+    if (r.crcOk) { setTextColor(GREEN); drawString(r.checkLabel ? "Check:OK" : "CRC:OK", 140, y); }
+    else { setTextColor(RED); drawString("CRC:FAIL", 140, y); }
     y = screenHeight - 55;
     var opts = ["Transmit", "Save", "Continue"];
     for (var i = 0; i < opts.length; i++) {
@@ -571,12 +612,11 @@ function drawInfo() {
     clearScreen(); setTextSize(2); setTextColor(CYAN); drawString("Protocols", 10, 5);
     setTextSize(1); setTextColor(WHITE);
     var y = 28;
-    drawString("Kia V0/V1/V2", 10, y); y += 10;
-    drawString("Ford V0, Suzuki", 10, y); y += 10;
-    drawString("StarLine (64-bit)", 10, y); y += 10;
-    drawString("Scher-Khan", 10, y); y += 10;
-    drawString("Subaru (64-bit)", 10, y); y += 10;
-    drawString("Fiat V0, Chrysler", 10, y);
+    drawString("Implemented: Kia V0 (FM476)", 10, y); y += 13;
+    drawString("Chrysler V0 (AM650), RX only", 10, y); y += 13;
+    drawString("Other advertised JS decoders", 10, y); y += 13;
+    drawString("are not implemented upstream.", 10, y); y += 13;
+    drawString("Unknown signals keep RAW data.", 10, y);
     setTextColor(YELLOW); drawString("[ESC] Back", 10, screenHeight - 12);
 }
 
@@ -637,11 +677,15 @@ function handleMenu() {
             appState = "freq"; 
             drawFreqSelect(); 
         }
-        else if (menuIndex === 5) { 
+        else if (menuIndex === 5) {
+            appState = "preset";
+            drawPresetSelect();
+        }
+        else if (menuIndex === 6) {
             appState = "info"; 
             drawInfo(); 
         }
-        else if (menuIndex === 6) { 
+        else if (menuIndex === 7) {
             appState = "exit"; 
         }
     }
@@ -678,7 +722,7 @@ function handleReceive() {
         drawMenu(); 
         return; 
     }
-    var rawContent = subghz.readRaw(1);
+    var rawContent = readCapture();
     if (getEscPress()) { 
         setLongPress(false); 
         appState = "menu"; 
@@ -687,22 +731,8 @@ function handleReceive() {
     }
     if (rawContent && rawContent.length > 10) {
         setLongPress(false);
-        clearScreen(); setTextSize(1); setTextColor(CYAN); drawString("RAW RECEIVED:", 10, 5);
-        setTextColor(WHITE); drawString("Len: " + rawContent.length, 10, 18);
-        var preview = rawContent.substring(0, 80); drawString(preview, 5, 32);
-        setTextColor(YELLOW); drawString("[SEL] Decode [ESC] Menu", 5, screenHeight - 12);
-        while (true) {
-            if (getEscPress()) { 
-                setLongPress(true); 
-                appState = "menu"; 
-                drawMenu(); 
-                return; 
-            }
-            if (getSelPress()) { break; }
-            delay(50);
-        }
         var rawStr = extractRawData(rawContent);
-        if (!rawStr && rawContent.indexOf(" ") > 0) { rawStr = rawContent; }
+
         if (rawStr && rawStr.length > 10) {
             var pulses = parseRaw(rawStr);
             if (pulses.length > 20) {
@@ -735,7 +765,7 @@ function handleReceive() {
                         if (getSelPress()) {
                             saveCounter++;
                             var filename = "pp_unknown_" + saveCounter + ".sub";
-                            var content = "Filetype: Flipper SubGhz Key File\nVersion: 1\nFrequency: " + Math.floor(frequency * 1000000) + "\nProtocol: RAW\nRAW_Data: " + lastRawData + "\n";
+                            var content = savedRawContent();
                             try { storage.write("/BruceRF/" + filename, content); drawMessage("Saved!", GREEN); delay(1000); } catch(e) { drawMessage("Failed!", RED); delay(1000); }
                             setLongPress(true); 
                             drawReceive(); 
@@ -795,6 +825,91 @@ function handleInfo() {
     } 
 }
 
+// Receive-only adaptation of the Chrysler V0 framing in Sor3nt PR #119,
+// commit 4c5e129911607afab93218051f5a4f57a7ac1b06. Credits: ProtoPirate
+// contributors / The Pirates' Plunder. No encoder or counter generation.
+function decodeChrysler(pulses) {
+    var step = 0, preamble = 0, last = 0, bits = [], bytes = [];
+    function short(d) { return abs(d - 300) <= 150; }
+    function long(d) { return abs(d - 3400) <= 400 || abs(d - 3700) <= 400; }
+    for (var i = 0; i < pulses.length; i++) {
+        var high = pulses[i] > 0, duration = abs(pulses[i]);
+        if (step === 0) {
+            if (high && short(duration)) { step = 1; last = duration; preamble = 0; }
+        } else if (step === 1) {
+            if (high) { last = duration; continue; }
+            if (long(duration)) {
+                if (short(last)) preamble++;
+                else if (preamble > 15) { bits = [1]; step = 2; }
+                else preamble = 0;
+            } else if (duration > 8000 && preamble > 15) { bits = []; step = 2; }
+            else { step = 0; preamble = 0; }
+        } else {
+            if (high) { last = duration; continue; }
+            if (duration > 8000 || last > 750 || !long(duration) || (last < 300 && !short(last))) {
+                step = 0; preamble = 0; bits = []; continue;
+            }
+            bits.push(short(last) ? 0 : 1);
+            if (bits.length !== 80) continue;
+            bytes = [];
+            for (var b = 0; b < 10; b++) {
+                var value = 0;
+                for (var k = 0; k < 8; k++) value = (value << 1) | bits[b * 8 + k];
+                bytes.push(value);
+            }
+            var xor = bytes[1] ^ bytes[6], button = 1, valid = false;
+            if (bytes[0] & 128) {
+                valid = bytes[1] === bytes[5] && xor === 0x62;
+                button = (bytes[9] ^ bytes[4]) === 0x10 ? 2 : 1;
+            } else {
+                valid = (bytes[1] ^ 0xC3) === bytes[5] && (xor === 4 || xor === 8);
+                button = xor === 8 ? 2 : 1;
+            }
+            step = 0; preamble = 0; bits = [];
+            if (!valid) continue;
+            var hex = "";
+            for (var j = 0; j < bytes.length; j++) hex += toHex(bytes[j], 2);
+            return {proto:"Chrysler V0", bits:80, rawHex:hex, serial:0, button:button,
+                btnName:button === 2 ? "Unlock" : "Lock", counter:0, crcOk:true,
+                checkLabel:"Structure check", receiveOnly:true, fieldsUnknown:true,
+                dataHi:((bytes[0]<<24)|(bytes[1]<<16)|(bytes[2]<<8)|bytes[3])>>>0,
+                dataLo:((bytes[4]<<24)|(bytes[5]<<16)|(bytes[6]<<8)|bytes[7])>>>0};
+        }
+    }
+    return null;
+}
+function drawPresetSelect() {
+    clearScreen(); setTextSize(1); setTextColor(CYAN);
+    drawString("Receive preset", 10, 15);
+    for (var i = 0; i < presetLabels.length; i++) {
+        setTextColor(i === presetIndex ? GREEN : WHITE);
+        drawString((i === presetIndex ? "> " : "  ") + presetLabels[i], 10, 40 + i * 20);
+    }
+    setTextColor(YELLOW); drawString("Turn:select Click/Back:apply", 5, screenHeight - 12);
+}
+function handlePresetSelect() {
+    if (getEscPress()) { presetName = presetLabels[presetIndex]; appState = "menu"; drawMenu(); return; }
+    if (getPrevPress()) { presetIndex = (presetIndex + 3) % 4; drawPresetSelect(); delay(100); }
+    if (getNextPress()) { presetIndex = (presetIndex + 1) % 4; drawPresetSelect(); delay(100); }
+    if (getSelPress()) {
+        presetName = presetLabels[presetIndex];
+        appState = "menu"; drawMenu(); delay(150);
+    }
+}
+function adoptFilePreset(content) {
+    var lines = content.split("\n"), found = "";
+    for (var i = 0; i < lines.length; i++)
+        if (lines[i].indexOf("Preset:") === 0) found = lines[i].substring(7).trim();
+    for (var j = 0; j < presetValues.length; j++) {
+        if (found === presetValues[j] || found === "FuriHalSubGhzPreset" + presetValues[j]) {
+            presetIndex = j; presetName = presetLabels[j]; return true;
+        }
+    }
+    // Unknown/custom modulation must not silently inherit the previous file.
+    presetName = "Unknown RX";
+    return false;
+}
+
 // ============================================================================
 // MAIN
 // ============================================================================
@@ -812,6 +927,7 @@ drawMenu();
 while (appState !== "exit") {
     if (appState === "menu") handleMenu();
     else if (appState === "receive") handleReceive();
+    else if (appState === "preset") handlePresetSelect();
     else if (appState === "result") handleResult();
     else if (appState === "info") handleInfo();
     else if (appState === "freq") handleFreqSelect();

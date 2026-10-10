@@ -1,6 +1,6 @@
 {
-  "name": "protopirate.js",
-  "description": "JavaScript car key fob decoder app (protopirate.js) with multi-protocol support (Kia V0-V4, Ford, Suzuki, StarLine, Scher-Khan, Subaru, Fiat, Chrysler/Jeep), frequency selection, load/save .sub files, rolling code TX, and CRC validation",
+  "name": "ProtoPirate",
+  "description": "RF capture with selectable AM/FM presets, lossless multi-line RAW import/save, Kia V0 receive decoding and receive-only Chrysler V0 structural decoding. Requires Bruce readRaw preset support.",
   "category": "RF",
   "version": "2.2.0",
   "commit": "6d2ac5ba910e8c19d94648ad1f319ad8f47bec0c",
@@ -12,10 +12,6 @@
     {
       "source": "ProtoPirate.js",
       "destination": "ProtoPirate.js"
-    },
-    {
-      "source": "protopirate.js",
-      "destination": "protopirate.js"
     }
   ]
 }

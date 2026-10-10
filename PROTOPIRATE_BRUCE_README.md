@@ -1,3 +1,9 @@
+# Historical ProtoPirate notes
+
+These notes describe an earlier design and include features that are placeholders
+in the current JavaScript source. See [README.md](README.md) for the implemented
+receive decoders, required firmware API, and current testing status.
+
 # ProtoPirate for Bruce Firmware
 
 A JavaScript port of the ProtoPirate car key fob decoder for the **Lilygo T-Embed CC1101** running **Bruce Firmware 1.14+**.
